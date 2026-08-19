@@ -604,7 +604,7 @@ function lineChart(values,color,soft,opts){
     fill:'tozeroy', fillcolor:soft?(soft+'99'):'rgba(0,0,0,0.05)',
     hovertemplate:'%{x}pct: <b>%{y}</b><extra></extra>',
   };
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(opts.fixLo!=null && opts.fixHi!=null){
     yax.range=[opts.fixLo,opts.fixHi];
     if(opts.major) yax.dtick=opts.major;
@@ -613,7 +613,7 @@ function lineChart(values,color,soft,opts){
   }
   const layout=__layout(180,{
     margin:{l:36,r:8,t:8,b:28},
-    xaxis:{dtick:20,tickfont:{size:11,family:'JetBrains Mono'},showgrid:false,zeroline:false,title:{text:'pct',font:{size:11}}},
+    xaxis:{dtick:20,tickfont:{size:12.5,family:'JetBrains Mono'},showgrid:false,zeroline:false,title:{text:'pct',font:{size:12.5}}},
     yaxis:yax,
   });
   return __newChartDivFull([trace],layout,180);
@@ -642,9 +642,9 @@ function horizonChart(blocks,color,recProf,opts){
         x:xs, y:prof, mode:'lines+markers', type:'scatter',
         line:{color:c,width:1.3}, marker:{color:c,size:3.5}, opacity:0.7, showlegend:false,
         customdata:PCTS.map(pc=>[blk.date||'',blk.wire||'',lf,bk,pt,pc]),
-        hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>%{customdata[5]}pct: <b>%{y}</b><extra></extra>',
+        hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>WG LT %{customdata[2]}<br>blk %{customdata[3]}<br>%{customdata[5]}pct: <b>%{y}</b><extra></extra>',
       });
-      lotMeta.push({wi, blk:bk, life:lf, xCenter:x0+0.5});
+      lotMeta.push({wi, blk:bk, life:lf, date:(blk.date||''), xCenter:x0+0.5});
       lastLot={x0};
       lotIndex++;
     });
@@ -667,11 +667,11 @@ function horizonChart(blocks,color,recProf,opts){
 
   // x축 tick: 점(lot)마다 blk/life
   const tickvals=lotMeta.map(m=>m.xCenter);
-  const ticktext=lotMeta.map(m=>`${m.blk||''}<br>${m.life?('life '+m.life):''}`);
+  const ticktext=lotMeta.map(m=>`${m.date||''}<br>${m.blk||''}<br>${m.life?('WG LT '+m.life):''}`);
 
   // 구간 브래킷 + wire/날짜
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -686,9 +686,7 @@ function horizonChart(blocks,color,recProf,opts){
     bracket(start+0.05, end+0.95, WIRE_BR_Y);
     const w=(blk.wire||'').toString();
     const wShort=w;  // 전체 표시
-    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
-    bracket(start+0.05, end+0.95, DATE_BR_Y);
-    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:12.5,family:'JetBrains Mono',color:'#2d3a46'}});
   });
   // 스펙/target (Bow류 아니면 없음)
   if(opts.specLo!=null){
@@ -698,15 +696,15 @@ function horizonChart(blocks,color,recProf,opts){
     shapes.push({type:'line',xref:'paper',x0:0,x1:1,y0:opts.target,y1:opts.target,line:{color:'#1a1a1a',width:1,dash:'dash'}});
   }
 
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
   const layout=__layout(280,{
-    margin:{l:40,r:8,t:8,b:120},
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
+    margin:{l:44,r:8,t:8,b:140},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.1,lotIndex+0.1]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:(recProf&&recProf.length)?true:false,
-    legend:{orientation:'h',x:0,y:1.10,font:{size:11}},
+    legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
   return __newChartDivFull(traces,layout,280);
 }
@@ -741,9 +739,10 @@ function lotTrendChart(blocks,color,opts){
   // 구간 브래킷: 날짜 (annotation)
   const tickvals=xs.slice(), ticktext=[];
   xs.forEach((x,i)=>{
-    const lt=cd[i][2]!=null&&cd[i][2]!==''?('life '+cd[i][2]):'';
-    const bk=cd[i][3]||'';
-    ticktext.push(`${bk}<br>${lt}`);   // 점마다 blk, life
+    const dt=cd[i][0]||'';                                   // 날짜 YYMMDD HH
+    const bk=cd[i][3]||'';                                    // blk
+    const lt=cd[i][2]!=null&&cd[i][2]!==''?('WG LT '+cd[i][2]):'';  // WG LT
+    ticktext.push(`${dt}<br>${bk}<br>${lt}`);   // 점마다 날짜/blk/WG LT
   });
 
   // 스케일
@@ -774,7 +773,7 @@ function lotTrendChart(blocks,color,opts){
     traces.push({
       x:g.x, y:g.y, customdata:g.cd, mode:'markers', type:'scatter',
       name:(pt&&pt!=='_')?pt:'', marker:{color:c,size:7},
-      hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
+      hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>WG LT %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
     });
   });
 
@@ -792,7 +791,7 @@ function lotTrendChart(blocks,color,opts){
   // ── 구간 브래킷 + 라벨 (annotation/shape, x는 data 좌표, y는 paper 아래쪽) ──
   const annos=[];
   // 브래킷 y 위치 (plot 아래 paper 좌표: 음수)
-  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     // ㄴ자 브래킷 (shape, xref data, yref paper)
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -809,22 +808,18 @@ function lotTrendChart(blocks,color,opts){
     const w=(blk.wire||'').toString();
     const wShort=w;  // 전체 표시
     annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,
-                font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
-    // 날짜 브래킷 + 날짜
-    bracket(start-0.35, end+0.35, DATE_BR_Y);
-    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,
-                font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
+                font:{size:12.5,family:'JetBrains Mono',color:'#2d3a46'}});
   });
 
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
   const layout=__layout(280,{
-    margin:{l:40,r:8,t:8,b:120},   // 4층 라벨 공간
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
+    margin:{l:44,r:8,t:8,b:140},   // 4층 라벨 공간
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.6,xs[xs.length-1]+0.6]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:Object.keys(byPt).length>1,
-    legend:{orientation:'h',x:0,y:1.10,font:{size:11}},
+    legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
   return __newChartDivFull(traces,layout,280);
 }
@@ -849,15 +844,15 @@ function barSlotChart(blocks,color,unit){
 
   const trace={
     x:xs, y:ys, type:'bar', marker:{color:colors}, customdata:cd,
-    text:texts, textposition:'outside', textfont:{size:10,family:'JetBrains Mono'},
-    hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
+    text:texts, textposition:'outside', textfont:{size:12.5,family:'JetBrains Mono'},
+    hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>WG LT %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
   };
 
-  // x축 tick: 점마다 blk/life
-  const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[3]||''}<br>${c[2]?('life '+c[2]):''}`);
+  // x축 tick: 점마다 날짜/blk/WG LT
+  const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[0]||''}<br>${c[3]||''}<br>${c[2]?('WG LT '+c[2]):''}`);
   // 구간 브래킷
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -869,16 +864,14 @@ function barSlotChart(blocks,color,unit){
     const end=start+cnt-1, mid=(start+end)/2;
     bracket(start-0.4,end+0.4,WIRE_BR_Y);
     const w=(blk.wire||'').toString(), wShort=w;
-    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
-    bracket(start-0.4,end+0.4,DATE_BR_Y);
-    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:12.5,family:'JetBrains Mono',color:'#2d3a46'}});
   });
 
   const layout=__layout(270,{
-    margin:{l:40,r:8,t:14,b:120},
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
+    margin:{l:44,r:8,t:14,b:140},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
-    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}},
+    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}},
     shapes:shapes, annotations:annos, showlegend:false,
   });
   return __newChartDivFull([trace],layout,270);
