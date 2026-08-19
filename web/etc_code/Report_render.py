@@ -53,6 +53,9 @@ STORE_CFG = {
     'ingot':'fdc_ingot_len',
     'wait': 'fdc_wait_time',
     'warm': 'fdc_warm_up_time',
+    'lifetime': 'WIREGUIDE_LIFE_TIME',
+    'blk': 'BLK_NO',
+    'pt': 'process_time',
 }
 
 
@@ -232,6 +235,23 @@ def load_actuals(store_path):
                                 'val': round(float(v), 3) if pd.notna(v) else None})
             return out
 
+        def lot_strs_col(sub, col_nm):
+            """지정 컬럼의 lot별 대표 문자열 리스트 (lot 순서)."""
+            out = []
+            real = None
+            if col_nm:
+                low = {c.lower(): c for c in sub.columns}
+                real = low.get(col_nm.lower())
+            if has_lot and real:
+                for lot, lg in sub.groupby(LOT, sort=False):
+                    v = lg[real].iloc[0]
+                    out.append('' if pd.isna(v) else str(v))
+            elif real:
+                for _, r in sub.iterrows():
+                    v = r.get(real)
+                    out.append('' if pd.isna(v) else str(v))
+            return out
+
         def wire_date(sub):
             """wire의 대표 날짜(첫 행)를 YYMMDD HH로."""
             dc = C.get('date')
@@ -250,6 +270,9 @@ def load_actuals(store_path):
             wire_blocks.append({
                 'wire': w,
                 'date': wire_date(sub),
+                'lifetimes': lot_strs_col(sub, C.get('lifetime')),
+                'blks':      lot_strs_col(sub, C.get('blk')),
+                'pts':       lot_strs_col(sub, C.get('pt')),
                 'frame':  lot_profiles(sub, ACT_FRAME),
                 'slurry': lot_profiles(sub, ACT_SLURRY),
                 'wg_l':   lot_profiles(sub, ACT_WG_L),
@@ -842,9 +865,9 @@ function buildActualHTML(a, recFrame, recSlurry){
   {
     // blocks(wire>lot)에서 인자별 구조 추출
     const B=a.blocks||[];
-    const prof=(key)=>B.map(b=>({wire:b.wire, date:b.date, lots:(b[key]||[]).map(x=>x.prof)}))
+    const prof=(key)=>B.map(b=>({wire:b.wire, date:b.date, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, lots:(b[key]||[]).map(x=>x.prof)}))
                         .filter(b=>b.lots.length);
-    const scal=(key)=>B.map(b=>({wire:b.wire, date:b.date, vals:(b[key]||[]).map(x=>x.val)}))
+    const scal=(key)=>B.map(b=>({wire:b.wire, date:b.date, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, vals:(b[key]||[]).map(x=>x.val)}))
                         .filter(b=>b.vals.length);
     const frB=prof('frame'), slB=prof('slurry'), wlB=prof('wg_l'), wrB=prof('wg_r');
     const inB=scal('ingot'), waB=scal('wait'), wmB=scal('warm');
