@@ -571,105 +571,112 @@ function __layout(h,extra){
 
 
 function lineChart(values,color,soft){
-  const W=300,H=150,padL=34,padR=10,padT=14,padB=24;
-  const mn=Math.min(...values),mx=Math.max(...values),sp=(mx-mn)||1;
-  const lo=mn-sp*0.15,hi=mx+sp*0.15,rng=hi-lo;
-  const x=i=>padL+(W-padL-padR)*(i/(values.length-1)),y=v=>padT+(H-padT-padB)*(1-(v-lo)/rng);
-  let grid='';for(let g=0;g<=2;g++){const val=lo+rng*g/2,yy=y(val);
-    grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#eef1f4"/>`;
-    grid+=`<text x="${padL-6}" y="${yy+3}" text-anchor="end" font-family="JetBrains Mono" font-size="9" fill="#9aa6b2">${val.toFixed(1)}</text>`;}
-  let xl='';[0,5,10].forEach(i=>{if(i<values.length)xl+=`<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#9aa6b2">${PCTS[i]}</text>`;});
-  const pts=values.map((v,i)=>`${x(i)},${y(v)}`).join(' ');
-  const area=`M${padL},${H-padB} L`+values.map((v,i)=>`${x(i)},${y(v)}`).join(' L')+` L${W-padR},${H-padB} Z`;
-  const dots=values.map((v,i)=>`<circle cx="${x(i)}" cy="${y(v)}" r="2.5" fill="${color}"/>`).join('');
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}">${grid}<path d="${area}" fill="${soft}" opacity="0.6"/><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>${dots}${xl}</svg>`;
+  if(!values||!values.length) return '<div class="cap">데이터 없음</div>';
+  const trace={
+    x:PCTS, y:values, customdata:PCTS,
+    mode:'lines+markers', type:'scatter',
+    line:{color:color,width:2.2}, marker:{color:color,size:4},
+    fill:'tozeroy', fillcolor:soft?(soft+'99'):'rgba(0,0,0,0.05)',
+    hovertemplate:'%{x}pct: <b>%{y}</b><extra></extra>',
+  };
+  const layout=__layout(180,{
+    margin:{l:36,r:8,t:8,b:28},
+    xaxis:{dtick:20,tickfont:{size:9,family:'JetBrains Mono'},showgrid:false,zeroline:false,title:{text:'pct',font:{size:9}}},
+    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:9}},
+  });
+  return __newChartDivFull([trace],layout,180);
 }
 
-// 사진 방식: wire별 구획을 가로로 이어 각 구획 안에서 0->100pct 진행
-// wire > lot > pct 3계층 프로파일
-//  blocks: [{wire:'W1', lots:[[...11pct], [...]]}, ...]  (각 wire의 lot 프로파일들)
+// X-Factor 프로파일 (Plotly) — 각 lot의 0~100pct를 가로로 이어붙임, 4층 x축
 function horizonChart(blocks,color,recProf,opts){
   opts=opts||{};
-  const W=760,H=220,padL=42,padR=12,padT=16,padB=58,wireGap=0.12,lotGap=0.12;
-  let all=blocks.flatMap(b=>b.lots.flat());
-  if(recProf && recProf.length) all=all.concat(recProf);  // 추천선도 범위에 포함
-  if(!all.length)return '<div class="cap">데이터 없음</div>';
-  let lo,hi;
-  if(opts.fixLo!=null && opts.fixHi!=null){
-    lo=opts.fixLo; hi=opts.fixHi;
-  } else {
-    const mn=Math.min(...all),mx=Math.max(...all),sp=(mx-mn)||1;
-    lo=mn-sp*0.12; hi=mx+sp*0.12;
-  }
-  const rng=(hi-lo)||1;
-  const nW=blocks.length, plotW=W-padL-padR, wireSlot=plotW/nW;
-  const y=v=>padT+(H-padT-padB)*(1-(v-lo)/rng);
-  // y grid: 고정 스케일이면 major/minor, 아니면 4분할
-  let grid='';
-  if(opts.major){
-    if(opts.minor){
-      for(let val=Math.ceil(lo/opts.minor)*opts.minor; val<=hi+1e-9; val+=opts.minor){
-        const yy=y(val);
-        grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#f0f2f4" stroke-width="0.6"/>`;
-      }
-    }
-    for(let val=Math.ceil(lo/opts.major)*opts.major; val<=hi+1e-9; val+=opts.major){
-      const yy=y(val);
-      grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#dde2e6" stroke-width="1"/>`;
-      grid+=`<text x="${padL-6}" y="${yy+3}" text-anchor="end" font-family="JetBrains Mono" font-size="9" fill="#9aa6b2">${(+val.toFixed(2))}</text>`;
-    }
-  } else {
-    for(let g=0;g<=3;g++){const val=lo+rng*g/3,yy=y(val);
-      grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#eef1f4"/>`;
-      grid+=`<text x="${padL-6}" y="${yy+3}" text-anchor="end" font-family="JetBrains Mono" font-size="9" fill="#9aa6b2">${val.toFixed(2)}</text>`;}
-  }
-  let body='';
-  let lastLotRegion=null;  // 최신 wire 최신 lot 구간 (추천선 그릴 위치)
+  // 각 lot을 x축에 이어붙임. lot li의 pct는 x = lotIndex + pct/100 (0~1 폭)
+  const traces=[];
+  let lotIndex=0;
+  const wireStart=[];    // wire별 시작 lotIndex
+  const lotMeta=[];      // 각 lot의 {wi, blk, life, pt, date, wire, xCenter}
+  let lastLot=null;
   blocks.forEach((blk,wi)=>{
-    const wireX=padL+wireSlot*wi;
-    if(wi%2===1) body+=`<rect x="${wireX}" y="${padT}" width="${wireSlot}" height="${H-padT-padB}" fill="#f6f6f6"/>`;
-    if(wi>0) body+=`<line x1="${wireX}" y1="${padT-4}" x2="${wireX}" y2="${H-padB}" stroke="#b8bfc6" stroke-width="1.6"/>`;
-    const inner=wireSlot*(1-wireGap), wStart=wireX+wireSlot*wireGap/2;
-    const nL=blk.lots.length, lotSlot=inner/nL;
-    blk.lots.forEach((prof,li)=>{
-      const lotX=wStart+lotSlot*li, lotInner=lotSlot*(1-lotGap), lStart=lotX+lotSlot*lotGap/2;
-      if(li>0) body+=`<line x1="${lotX}" y1="${padT}" x2="${lotX}" y2="${H-padB}" stroke="#e5e8eb" stroke-width="0.8" stroke-dasharray="2 2"/>`;
-      const xx=i=>lStart+lotInner*(i/(prof.length-1));
-      const pts=prof.map((v,i)=>`${xx(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-      body+=`<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/>`;
-      body+=prof.map((v,i)=>`<circle cx="${xx(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="1.3" fill="${color}"/>`).join('');
-      // 최신 wire의 최신 lot 위치 기억
-      if(wi===blocks.length-1 && li===blk.lots.length-1){
-        lastLotRegion={lStart, lotInner, npts:prof.length};
-      }
+    wireStart.push(lotIndex);
+    const lots=blk.lots||[];
+    lots.forEach((prof,li)=>{
+      const x0=lotIndex;
+      const xs=prof.map((_,i)=>x0 + (PCTS[i]/100)*0.86 + 0.07); // lot 폭 안에서 pct
+      const pt=(blk.pts&&blk.pts[li])||'';
+      const c=pt?__ptColor(pt,0):color;
+      const bk=(blk.blks&&blk.blks[li])||'';
+      const lf=(blk.lifetimes&&blk.lifetimes[li])||'';
+      traces.push({
+        x:xs, y:prof, mode:'lines', type:'scatter',
+        line:{color:c,width:1.3}, opacity:0.6, showlegend:false,
+        customdata:PCTS.map(pc=>[blk.date||'',blk.wire||'',lf,bk,pt,pc]),
+        hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>%{customdata[5]}pct: <b>%{y}</b><extra></extra>',
+      });
+      lotMeta.push({wi, blk:bk, life:lf, xCenter:x0+0.5});
+      lastLot={x0};
+      lotIndex++;
     });
-    const wid=(blk.wire||'').toString(), cx=wireX+wireSlot/2;
-    const wdate=(blk.date||'').toString();
-    // wire 구간 브래킷 + 2단 라벨 (1단 wire id, 2단 날짜)
-    const bx0=wireX+2, bx1=wireX+wireSlot-2, byTop=H-padB+4;
-    body+=`<path d="M${bx0} ${byTop} L${bx0} ${byTop+5} L${bx1} ${byTop+5} L${bx1} ${byTop}" fill="none" stroke="#c2c9d0" stroke-width="1"/>`;
-    // wire id (구간 중앙, 필요시 축약)
-    const maxChars=Math.max(4,Math.floor(wireSlot/6));
-    const widShort=wid.length>maxChars?wid.slice(-maxChars):wid;
-    body+=`<text x="${cx}" y="${byTop+16}" text-anchor="middle" font-family="JetBrains Mono" font-size="8" fill="#4a5560">${widShort}</text>`;
-    // 날짜 (그 아래)
-    body+=`<text x="${cx}" y="${byTop+27}" text-anchor="middle" font-family="JetBrains Mono" font-size="7.5" fill="#7a8896">${wdate}</text>`;
   });
-  // ── 추천선 오버레이 (빨강) — 최신 lot 구간 위에 ──
-  if(recProf && recProf.length && lastLotRegion){
-    const {lStart, lotInner, npts}=lastLotRegion;
-    const n=recProf.length;
-    const xx=i=>lStart+lotInner*(i/(n-1));
-    const pts=recProf.map((v,i)=>`${xx(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-    body+=`<polyline points="${pts}" fill="none" stroke="#d92d20" stroke-width="2.2" stroke-linejoin="round"/>`;
-    body+=recProf.map((v,i)=>`<circle cx="${xx(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="1.8" fill="#d92d20"/>`).join('');
-    // 추천 라벨
-    body+=`<text x="${xx(n-1).toFixed(1)}" y="${(y(recProf[n-1])-6).toFixed(1)}" text-anchor="end" font-family="JetBrains Mono" font-size="8.5" font-weight="700" fill="#d92d20">추천</text>`;
+  if(!traces.length) return '<div class="cap">데이터 없음</div>';
+
+  // 추천선 (최신 lot 구간 위, 빨강)
+  if(recProf && recProf.length && lastLot){
+    const xs=recProf.map((_,i)=>lastLot.x0 + (PCTS[i]/100)*0.86 + 0.07);
+    traces.push({
+      x:xs, y:recProf, mode:'lines+markers', type:'scatter', name:'추천',
+      line:{color:'#d92d20',width:2.2}, marker:{color:'#d92d20',size:3}, showlegend:true,
+      hovertemplate:'추천 %{customdata}pct: <b>%{y}</b><extra></extra>', customdata:PCTS,
+    });
   }
-  const legendRec = (recProf && recProf.length) ?
-    `<line x1="${W-padR-120}" y1="12" x2="${W-padR-104}" y2="12" stroke="#d92d20" stroke-width="2.2"/><text x="${W-padR-100}" y="15" font-family="JetBrains Mono" font-size="8.5" fill="#d92d20">추천 recipe</text>` : '';
-  const xaxis=`<text x="${padL+plotW/2}" y="${H-4}" text-anchor="middle" font-family="JetBrains Mono" font-size="8.5" fill="#7a8896">Wire ID &gt; lot &gt; pct 0→100% (굵은선=wire, 얕은선=lot, 빨강=추천)</text>`;
-  return `<svg class="chart chart-horizon" viewBox="0 0 ${W} ${H}">${grid}${body}${legendRec}${xaxis}</svg>`;
+
+  // 스케일
+  let yrange=null,dtick=null;
+  if(opts.fixLo!=null && opts.fixHi!=null){ yrange=[opts.fixLo,opts.fixHi]; dtick=opts.major||null; }
+
+  // x축 tick: 점(lot)마다 blk/life
+  const tickvals=lotMeta.map(m=>m.xCenter);
+  const ticktext=lotMeta.map(m=>`${m.blk||''}<br>${m.life?('life '+m.life):''}`);
+
+  // 구간 브래킷 + wire/날짜
+  const shapes=[], annos=[];
+  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  function bracket(x0,x1,yb){
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x1,x1:x1,y0:yb,y1:yb+0.03,line:{color:'#b8bfc6',width:1}});
+  }
+  blocks.forEach((blk,wi)=>{
+    const start=wireStart[wi];
+    const cnt=(blk.lots||[]).length;
+    if(!cnt) return;
+    const end=start+cnt-1;
+    const mid=(start+end)/2+0.5;
+    bracket(start+0.05, end+0.95, WIRE_BR_Y);
+    const w=(blk.wire||'').toString();
+    const wShort=w.length>10?'…'+w.slice(-8):w;
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+    bracket(start+0.05, end+0.95, DATE_BR_Y);
+    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+  });
+  // 스펙/target (Bow류 아니면 없음)
+  if(opts.specLo!=null){
+    shapes.push({type:'rect',xref:'paper',x0:0,x1:1,y0:opts.specLo,y1:opts.specHi,fillcolor:'#000',opacity:0.04,line:{width:0}});
+  }
+  if(opts.target!=null){
+    shapes.push({type:'line',xref:'paper',x0:0,x1:1,y0:opts.target,y1:opts.target,line:{color:'#1a1a1a',width:1,dash:'dash'}});
+  }
+
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false};
+  if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
+  const layout=__layout(280,{
+    margin:{l:40,r:8,t:8,b:120},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
+           showgrid:false,zeroline:false,range:[-0.1,lotIndex+0.1]},
+    yaxis:yax, shapes:shapes, annotations:annos,
+    showlegend:(recProf&&recProf.length)?true:false,
+    legend:{orientation:'h',x:0,y:1.10,font:{size:9}},
+  });
+  return __newChartDivFull(traces,layout,280);
 }
 
 // wire>lot 트렌드 (Plotly) — 각 lot=점, 4중첩 x축, 고정스케일, target/스펙
@@ -696,18 +703,15 @@ function lotTrendChart(blocks,color,opts){
   });
   if(!xs.length) return '<div class="cap">데이터 없음</div>';
 
-  // 4중첩 x축 tick: wire 구간 시작 위치에 날짜/wire/lifetime/blk 4줄
-  const tickvals=[], ticktext=[];
-  blocks.forEach((blk,wi)=>{
-    const start=wireStart[wi];
-    const cnt=(blk.vals||[]).length;
-    const mid=start+(cnt-1)/2;
-    tickvals.push(mid);
-    const w=(blk.wire||'').toString();
-    const wShort=w.length>8?'…'+w.slice(-6):w;
-    const lt=(blk.lifetimes&&blk.lifetimes[0]!=null)?('life '+blk.lifetimes[0]):'';
-    const bk=(blk.blks&&blk.blks[0]!=null)?blk.blks[0]:'';
-    ticktext.push(`${blk.date||''}<br><b>${wShort}</b><br>${lt}<br>${bk}`);
+  // ── x축 4층 구조 ──
+  // 점마다: blk / life (tick 라벨 2줄)
+  // 구간 브래킷: wire id (annotation)
+  // 구간 브래킷: 날짜 (annotation)
+  const tickvals=xs.slice(), ticktext=[];
+  xs.forEach((x,i)=>{
+    const lt=cd[i][2]!=null&&cd[i][2]!==''?('life '+cd[i][2]):'';
+    const bk=cd[i][3]||'';
+    ticktext.push(`${bk}<br>${lt}`);   // 점마다 blk, life
   });
 
   // 스케일
@@ -733,13 +737,7 @@ function lotTrendChart(blocks,color,opts){
     });
   });
 
-  // 추천선 (opts.recProf: [값...] 0~100pct는 여기선 없음 — lotTrend는 스칼라라 생략)
   const shapes=[];
-  // wire 경계 (세로 옅은 선)
-  for(let wi=1;wi<blocks.length;wi++){
-    shapes.push({type:'line',x0:wireStart[wi]-0.5,x1:wireStart[wi]-0.5,yref:'paper',y0:0,y1:1,
-                 line:{color:'#d5dbe0',width:1}});
-  }
   // 스펙 밴드 + target
   if(opts.specLo!=null){
     shapes.push({type:'rect',xref:'paper',x0:0,x1:1,y0:opts.specLo,y1:opts.specHi,
@@ -750,61 +748,99 @@ function lotTrendChart(blocks,color,opts){
                  line:{color:'#1a1a1a',width:1,dash:'dash'}});
   }
 
+  // ── 구간 브래킷 + 라벨 (annotation/shape, x는 data 좌표, y는 paper 아래쪽) ──
+  const annos=[];
+  // 브래킷 y 위치 (plot 아래 paper 좌표: 음수)
+  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  function bracket(x0,x1,yb){
+    // ㄴ자 브래킷 (shape, xref data, yref paper)
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x1,x1:x1,y0:yb,y1:yb+0.03,line:{color:'#b8bfc6',width:1}});
+  }
+  blocks.forEach((blk,wi)=>{
+    const start=wireStart[wi];
+    const cnt=(blk.vals||[]).length;
+    const end=start+cnt-1;
+    const mid=(start+end)/2;
+    // wire 브래킷 + id
+    bracket(start-0.35, end+0.35, WIRE_BR_Y);
+    const w=(blk.wire||'').toString();
+    const wShort=w.length>10?'…'+w.slice(-8):w;
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,
+                font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+    // 날짜 브래킷 + 날짜
+    bracket(start-0.35, end+0.35, DATE_BR_Y);
+    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,
+                font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+  });
+
   const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
-  const layout=__layout(230,{
+  const layout=__layout(280,{
+    margin:{l:40,r:8,t:8,b:120},   // 4층 라벨 공간
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.6,xs[xs.length-1]+0.6]},
-    yaxis:yax, shapes:shapes,
+    yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:Object.keys(byPt).length>1,
-    legend:{orientation:'h',x:0,y:1.12,font:{size:9}},
+    legend:{orientation:'h',x:0,y:1.10,font:{size:9}},
   });
-  return __newChartDivFull(traces,layout,230);
+  return __newChartDivFull(traces,layout,280);
 }
 
 function barSlotChart(blocks,color,unit){
-  const W=760,H=200,padL=42,padR=12,padT=16,padB=58,wireGap=0.12,lotGap=0.25;
-  const all=blocks.flatMap(b=>b.vals).filter(v=>v!=null);
-  if(!all.length)return '<div class="cap">데이터 없음</div>';
-  const mn=Math.min(...all),mx=Math.max(...all),sp=(mx-mn)||1;
-  const lo=mn-sp*0.15,hi=mx+sp*0.15,rng=hi-lo;
-  const nW=blocks.length, plotW=W-padL-padR, wireSlot=plotW/nW;
-  const y=v=>padT+(H-padT-padB)*(1-(v-lo)/rng);
-  let grid='';for(let g=0;g<=3;g++){const val=lo+rng*g/3,yy=y(val);
-    grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#eef1f4"/>`;
-    grid+=`<text x="${padL-6}" y="${yy+3}" text-anchor="end" font-family="JetBrains Mono" font-size="9" fill="#9aa6b2">${val.toFixed(1)}</text>`;}
-  let body='';
+  // 각 lot=막대 하나, 4층 x축(점마다 blk/life, 구간 wire/날짜)
+  const xs=[], ys=[], colors=[], cd=[], texts=[];
+  let idx=0; const wireStart=[];
   blocks.forEach((blk,wi)=>{
-    const wireX=padL+wireSlot*wi;
-    if(wi%2===1) body+=`<rect x="${wireX}" y="${padT}" width="${wireSlot}" height="${H-padT-padB}" fill="#f6f6f6"/>`;
-    if(wi>0) body+=`<line x1="${wireX}" y1="${padT-4}" x2="${wireX}" y2="${H-padB}" stroke="#b8bfc6" stroke-width="1.6"/>`;
-    const inner=wireSlot*(1-wireGap), wStart=wireX+wireSlot*wireGap/2;
-    const nL=blk.vals.length, lotSlot=inner/nL, barW=lotSlot*(1-lotGap);
-    blk.vals.forEach((v,li)=>{
-      const lotX=wStart+lotSlot*li+lotSlot*lotGap/2;
-      if(v!=null){
-        const yy=y(v), h=(H-padB)-yy;
-        body+=`<rect x="${lotX.toFixed(1)}" y="${yy.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${color}" opacity="0.75" rx="1"/>`;
-        // 막대 위에 값 레이블
-        const lblX=lotX+barW/2, lblY=yy-3;
-        const lblTxt=(Math.abs(v)>=100)?v.toFixed(0):v.toFixed(1);
-        body+=`<text x="${lblX.toFixed(1)}" y="${lblY.toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono" font-size="7.5" fill="#4a5560">${lblTxt}</text>`;
-      }
+    wireStart.push(idx);
+    (blk.vals||[]).forEach((v,li)=>{
+      xs.push(idx); ys.push(v);
+      const pt=(blk.pts&&blk.pts[li])||'';
+      colors.push(pt?__ptColor(pt,0):color);
+      const bk=(blk.blks&&blk.blks[li])||'', lf=(blk.lifetimes&&blk.lifetimes[li])||'';
+      cd.push([blk.date||'',blk.wire||'',lf,bk,pt]);
+      texts.push(v!=null?((Math.abs(v)>=100)?v.toFixed(0):v.toFixed(1)):'');
+      idx++;
     });
-    const wid=(blk.wire||'').toString(), cx=wireX+wireSlot/2;
-    const wdate=(blk.date||'').toString();
-    // wire 구간 브래킷 + 2단 라벨 (1단 wire id, 2단 날짜)
-    const bx0=wireX+2, bx1=wireX+wireSlot-2, byTop=H-padB+4;
-    body+=`<path d="M${bx0} ${byTop} L${bx0} ${byTop+5} L${bx1} ${byTop+5} L${bx1} ${byTop}" fill="none" stroke="#c2c9d0" stroke-width="1"/>`;
-    // wire id (구간 중앙, 필요시 축약)
-    const maxChars=Math.max(4,Math.floor(wireSlot/6));
-    const widShort=wid.length>maxChars?wid.slice(-maxChars):wid;
-    body+=`<text x="${cx}" y="${byTop+16}" text-anchor="middle" font-family="JetBrains Mono" font-size="8" fill="#4a5560">${widShort}</text>`;
-    // 날짜 (그 아래)
-    body+=`<text x="${cx}" y="${byTop+27}" text-anchor="middle" font-family="JetBrains Mono" font-size="7.5" fill="#7a8896">${wdate}</text>`;
   });
-  const xaxis=`<text x="${padL+plotW/2}" y="${H-4}" text-anchor="middle" font-family="JetBrains Mono" font-size="8.5" fill="#7a8896">Wire ID &gt; lot (굵은선=wire, 시간순) · ${unit}</text>`;
-  return `<svg class="chart chart-horizon" viewBox="0 0 ${W} ${H}">${grid}${body}${xaxis}</svg>`;
+  if(!xs.length) return '<div class="cap">데이터 없음</div>';
+
+  const trace={
+    x:xs, y:ys, type:'bar', marker:{color:colors}, customdata:cd,
+    text:texts, textposition:'outside', textfont:{size:8,family:'JetBrains Mono'},
+    hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
+  };
+
+  // x축 tick: 점마다 blk/life
+  const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[3]||''}<br>${c[2]?('life '+c[2]):''}`);
+  // 구간 브래킷
+  const shapes=[], annos=[];
+  const WIRE_BR_Y=-0.30, WIRE_TX_Y=-0.40, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  function bracket(x0,x1,yb){
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
+    shapes.push({type:'line',xref:'x',yref:'paper',x0:x1,x1:x1,y0:yb,y1:yb+0.03,line:{color:'#b8bfc6',width:1}});
+  }
+  blocks.forEach((blk,wi)=>{
+    const start=wireStart[wi], cnt=(blk.vals||[]).length;
+    if(!cnt) return;
+    const end=start+cnt-1, mid=(start+end)/2;
+    bracket(start-0.4,end+0.4,WIRE_BR_Y);
+    const w=(blk.wire||'').toString(), wShort=w.length>10?'…'+w.slice(-8):w;
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+    bracket(start-0.4,end+0.4,DATE_BR_Y);
+    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+  });
+
+  const layout=__layout(270,{
+    margin:{l:40,r:8,t:14,b:120},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
+           showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
+    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false},
+    shapes:shapes, annotations:annos, showlegend:false,
+  });
+  return __newChartDivFull([trace],layout,270);
 }
 
 // 단일 라인 트렌드 (계열 하나)
