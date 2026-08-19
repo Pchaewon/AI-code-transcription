@@ -271,11 +271,33 @@ def load_actuals(store_path):
                 return f"{yy}{mm}{dd} {hh}"
             return raw[:11]
 
+        def fmt_date_val(raw):
+            """단일 날짜값을 YYMMDD HH로."""
+            digits = ''.join(ch for ch in str(raw) if ch.isdigit())
+            if len(digits) >= 10:
+                return f"{digits[2:4]}{digits[4:6]}{digits[6:8]} {digits[8:10]}"
+            return str(raw)[:11]
+
+        def lot_dates(sub):
+            """lot별 날짜 리스트 (YYMMDD HH, lot 순서)."""
+            dc = C.get('date')
+            if not dc or dc not in sub.columns:
+                return []
+            out = []
+            if has_lot:
+                for lot, lg in sub.groupby(LOT, sort=False):
+                    out.append(fmt_date_val(lg[dc].iloc[0]))
+            else:
+                for _, r in sub.iterrows():
+                    out.append(fmt_date_val(r.get(dc)))
+            return out
+
         for w in recent_wires:
             sub = g[g[wire_col].astype(str) == w]
             wire_blocks.append({
                 'wire': w,
                 'date': wire_date(sub),
+                'dates': lot_dates(sub),
                 'lifetimes': lot_strs_col(sub, C.get('lifetime'), as_int=True),
                 'blks':      lot_strs_col(sub, C.get('blk')),
                 'pts':       lot_strs_col(sub, C.get('pt')),
@@ -641,10 +663,10 @@ function horizonChart(blocks,color,recProf,opts){
       traces.push({
         x:xs, y:prof, mode:'lines+markers', type:'scatter',
         line:{color:c,width:1.3}, marker:{color:c,size:3.5}, opacity:0.7, showlegend:false,
-        customdata:PCTS.map(pc=>[blk.date||'',blk.wire||'',lf,bk,pt,pc]),
+        customdata:PCTS.map(pc=>[(blk.dates&&blk.dates[li])||blk.date||'',blk.wire||'',lf,bk,pt,pc]),
         hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>WG LT %{customdata[2]}<br>blk %{customdata[3]}<br>%{customdata[5]}pct: <b>%{y}</b><extra></extra>',
       });
-      lotMeta.push({wi, blk:bk, life:lf, date:(blk.date||''), xCenter:x0+0.5});
+      lotMeta.push({wi, blk:bk, life:lf, date:((blk.dates&&blk.dates[li])||blk.date||''), xCenter:x0+0.5});
       lastLot={x0};
       lotIndex++;
     });
@@ -671,7 +693,7 @@ function horizonChart(blocks,color,recProf,opts){
 
   // 구간 브래킷 + wire/날짜
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.78, WIRE_TX_Y=-0.90, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -698,15 +720,15 @@ function horizonChart(blocks,color,recProf,opts){
 
   const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
-  const layout=__layout(330,{
-    margin:{l:44,r:8,t:8,b:170},
+  const layout=__layout(370,{
+    margin:{l:44,r:8,t:8,b:200},
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.1,lotIndex+0.1]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:(recProf&&recProf.length)?true:false,
     legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
-  return __newChartDivFull(traces,layout,330);
+  return __newChartDivFull(traces,layout,370);
 }
 
 // wire>lot 트렌드 (Plotly) — 각 lot=점, 4중첩 x축, 고정스케일, target/스펙
@@ -726,7 +748,7 @@ function lotTrendChart(blocks,color,opts){
       const lt=(blk.lifetimes&&blk.lifetimes[li]!=null)?blk.lifetimes[li]:'';
       const bk=(blk.blks&&blk.blks[li]!=null)?blk.blks[li]:'';
       const pt=(blk.pts&&blk.pts[li]!=null)?blk.pts[li]:'';
-      cd.push([blk.date||'', blk.wire||'', lt, bk, pt]);
+      cd.push([(blk.dates&&blk.dates[li])||blk.date||'', blk.wire||'', lt, bk, pt]);
       colors.push(pt?__ptColor(pt,0):color);
       idx++;
     });
@@ -791,7 +813,7 @@ function lotTrendChart(blocks,color,opts){
   // ── 구간 브래킷 + 라벨 (annotation/shape, x는 data 좌표, y는 paper 아래쪽) ──
   const annos=[];
   // 브래킷 y 위치 (plot 아래 paper 좌표: 음수)
-  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.78, WIRE_TX_Y=-0.90, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     // ㄴ자 브래킷 (shape, xref data, yref paper)
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -813,15 +835,15 @@ function lotTrendChart(blocks,color,opts){
 
   const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
-  const layout=__layout(330,{
-    margin:{l:44,r:8,t:8,b:170},   // 4층 라벨 공간
+  const layout=__layout(370,{
+    margin:{l:44,r:8,t:8,b:200},   // 4층 라벨 공간
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.6,xs[xs.length-1]+0.6]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:Object.keys(byPt).length>1,
     legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
-  return __newChartDivFull(traces,layout,330);
+  return __newChartDivFull(traces,layout,370);
 }
 
 function barSlotChart(blocks,color,unit){
@@ -835,7 +857,7 @@ function barSlotChart(blocks,color,unit){
       const pt=(blk.pts&&blk.pts[li])||'';
       colors.push(pt?__ptColor(pt,0):color);
       const bk=(blk.blks&&blk.blks[li])||'', lf=(blk.lifetimes&&blk.lifetimes[li])||'';
-      cd.push([blk.date||'',blk.wire||'',lf,bk,pt]);
+      cd.push([(blk.dates&&blk.dates[li])||blk.date||'',blk.wire||'',lf,bk,pt]);
       texts.push(v!=null?((Math.abs(v)>=100)?v.toFixed(0):v.toFixed(1)):'');
       idx++;
     });
@@ -852,7 +874,7 @@ function barSlotChart(blocks,color,unit){
   const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[0]||''}<br>${c[3]||''}<br>${c[2]?('WG LT '+c[2]):''}`);
   // 구간 브래킷
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.78, WIRE_TX_Y=-0.90, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -867,14 +889,14 @@ function barSlotChart(blocks,color,unit){
     annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:12.5,family:'JetBrains Mono',color:'#2d3a46'}});
   });
 
-  const layout=__layout(320,{
-    margin:{l:44,r:8,t:14,b:170},
+  const layout=__layout(360,{
+    margin:{l:44,r:8,t:14,b:200},
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
     yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}},
     shapes:shapes, annotations:annos, showlegend:false,
   });
-  return __newChartDivFull([trace],layout,320);
+  return __newChartDivFull([trace],layout,360);
 }
 
 // 단일 라인 트렌드 (계열 하나)
@@ -935,9 +957,9 @@ function buildActualHTML(a, recFrame, recSlurry){
   {
     // blocks(wire>lot)에서 인자별 구조 추출
     const B=a.blocks||[];
-    const prof=(key)=>B.map(b=>({wire:b.wire, date:b.date, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, lots:(b[key]||[]).map(x=>x.prof)}))
+    const prof=(key)=>B.map(b=>({wire:b.wire, date:b.date, dates:b.dates, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, lots:(b[key]||[]).map(x=>x.prof)}))
                         .filter(b=>b.lots.length);
-    const scal=(key)=>B.map(b=>({wire:b.wire, date:b.date, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, vals:(b[key]||[]).map(x=>x.val)}))
+    const scal=(key)=>B.map(b=>({wire:b.wire, date:b.date, dates:b.dates, lifetimes:b.lifetimes, blks:b.blks, pts:b.pts, vals:(b[key]||[]).map(x=>x.val)}))
                         .filter(b=>b.vals.length);
     const frB=prof('frame'), slB=prof('slurry'), wlB=prof('wg_l'), wrB=prof('wg_r');
     const inB=scal('ingot'), waB=scal('wait'), wmB=scal('warm');
