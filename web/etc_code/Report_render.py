@@ -141,14 +141,12 @@ def load_actuals(store_path):
     acts = {}
     LOT = 'lot_id'
     has_pt = 'process_time' in df.columns
-    # eqp + process_time 단위로 그룹 (process_time 없으면 eqp만)
-    group_keys = [C['eqp']] + (['process_time'] if has_pt else [])
+    # eqp 단위로만 그룹 (가공시간 통합 — process_time은 lot별 속성으로 유지)
+    group_keys = [C['eqp']]
     for gk, g in df.groupby(group_keys):
-        if has_pt:
-            eqp, pt_val = gk if isinstance(gk, tuple) else (gk, '')
-        else:
-            eqp, pt_val = gk, ''
-        acts_key = f"{eqp}|{pt_val}" if has_pt else str(eqp)
+        eqp = gk[0] if isinstance(gk, tuple) else gk
+        pt_val = ''  # 통합이므로 대표 pt 없음
+        acts_key = str(eqp)
 
         if C['date'] in g.columns:
             g = g.sort_values(C['date'])
@@ -302,9 +300,17 @@ def load_actuals(store_path):
 
         # 실제 표시된 lot 총수 (blocks의 frame lot 합)
         n_lots = sum(len(b.get('frame', [])) for b in wire_blocks)
+        # 마지막(최근) 가공시간: 마지막 wire block의 마지막 lot pt
+        last_pt = ''
+        for b in reversed(wire_blocks):
+            pts_list = b.get('pts', [])
+            if pts_list:
+                last_pt = str(pts_list[-1])
+                break
         acts[acts_key] = {
             'eqp': str(eqp),
             'process_time': pt_val,
+            'last_process_time': last_pt,
             'wires': bow_wires,
             'n_lots': n_lots,
             'bow':  series['bow'],
@@ -318,20 +324,31 @@ def load_actuals(store_path):
 
 
 def merge(recs, acts):
-    """추천의 각 process_time 블록에 해당 (eqp, process_time) 실측을 매칭."""
+    """가공시간 통합 실측 + 마지막 끝난 가공시간의 추천만 선택."""
     out = []
     for eqp, r in recs.items():
-        # 각 process_time 블록(pts)에 실측 붙이기
+        a = acts.get(str(eqp))
+        r['actual'] = a
+        # 마지막 끝난 가공시간
+        last_pt = a['last_process_time'] if a else ''
+        # 그 가공시간에 해당하는 추천 1개 선택
+        chosen = None
         for p in r.get('pts', []):
-            pt = p.get('process_time', '')
-            key = f"{eqp}|{pt}"
-            # process_time별 실측, 없으면 pt 없는 키(eqp)도 시도
-            p['actual'] = acts.get(key) or acts.get(str(eqp))
-        # 카드 대표 실측 (요약/상단용): 첫 블록의 실측
-        if r.get('pts'):
-            r['actual'] = r['pts'][0].get('actual')
-        else:
-            r['actual'] = acts.get(str(eqp))
+            if str(p.get('process_time', '')) == last_pt:
+                chosen = p
+                break
+        if chosen is None and r.get('pts'):
+            chosen = r['pts'][-1]  # 못 찾으면 마지막 pts
+        # 대표 추천값을 카드 상단용으로 평탄화
+        if chosen:
+            r['chosen_pt'] = chosen.get('process_time', '')
+            r['bow'] = chosen.get('bow', r.get('bow'))
+            r['wire'] = chosen.get('wire', r.get('wire'))
+            r['rec_frame'] = chosen.get('rec_frame')
+            r['rec_slurry'] = chosen.get('rec_slurry')
+            r['frame_bow_rec'] = chosen.get('frame_bow_rec')
+            r['slurry_bow_rec'] = chosen.get('slurry_bow_rec')
+            r['waf'] = chosen.get('waf', r.get('waf'))
         out.append(r)
     return out
 
@@ -1003,29 +1020,30 @@ function buildActualHTML(a, recFrame, recSlurry){
 }
 
 function card(d){
+  const bow = (d.bow!=null?d.bow:TARGET);
+  const plo=(bow-RANGE).toFixed(2), phi=(bow+RANGE).toFixed(2);
+  const ptLabel = d.chosen_pt ? `<span class="pt-badge">최근 가공시간 ${d.chosen_pt}</span>` : '';
+  const recFrame = d.rec_frame, recSlurry = d.rec_slurry;
+  const hasRec = recFrame && recFrame.length;
   return `<section class="eqp" id="eqp-${d.eqp}">
-    <div class="eqp-head"><span class="eqp-name">${d.eqp}</span><div class="grow"></div>
-      <span class="badge badge-waf">WAF ${d.waf}개</span><span class="badge badge-time">__PTIME__</span>
+    <div class="eqp-head"><span class="eqp-name">${d.eqp}</span>${ptLabel}<div class="grow"></div>
+      <span class="badge badge-waf">WAF ${d.waf||0}개</span>
       <button class="home-btn" onclick="document.getElementById('summary-top').scrollIntoView({behavior:'smooth',block:'start'})">↑ 요약으로</button></div>
 
-    ${(d.pts||[{process_time:'',bow:d.bow,wire:d.wire,rec_frame:d.rec_frame,rec_slurry:d.rec_slurry,actual:d.actual}]).map(p=>{
-      const plo=(p.bow-RANGE).toFixed(2), phi=(p.bow+RANGE).toFixed(2);
-      const ptLabel = p.process_time ? `<span class="pt-badge">${p.process_time}</span>` : '';
-      return `
-      <div class="pt-block-full">
-        <div class="sec-label sec-rec"><span class="tag">RECOMMEND</span> 추천 · 미래 lot (역산) ${ptLabel}</div>
-        <div class="bow-band"><span class="lbl">예상 BOW</span><span class="bow-val">${p.bow.toFixed(2)}</span>
-          <span class="bow-range">${plo} ~ ${phi} µm</span>
-          <span class="bow-target">Target <b>${TARGET}</b> · 최근 wire <code>${p.wire}</code></span></div>
-        <div class="profiles">
-          <div class="profile"><h3><span class="sw" style="background:var(--frame)"></span>① Frame Temp 추천${p.frame_bow_rec!=null?`<span class="rec-bow">추천 사용시 예상 BOW <b>${p.frame_bow_rec.toFixed(3)}</b></span>`:''}</h3>
-            <div class="unit">rec_set_frame_temp · °C · 0→100pct</div>${lineChart(p.rec_frame,'#0f5c8c','#cfe2ef')}${tbl(p.rec_frame)}</div>
-          <div class="profile"><h3><span class="sw" style="background:var(--slurry)"></span>② Slurry Temp 추천${p.slurry_bow_rec!=null?`<span class="rec-bow">추천 사용시 예상 BOW <b>${p.slurry_bow_rec.toFixed(3)}</b></span>`:''}</h3>
-            <div class="unit">rec_set_slurry_temp · °C · 0→100pct</div>${lineChart(p.rec_slurry,'#b8531f','#f0d9c9')}${tbl(p.rec_slurry)}</div>
-        </div>
-        ${buildActualHTML(p.actual, p.rec_frame, p.rec_slurry)}
-      </div>`;
-    }).join('')}
+    <div class="pt-block-full">
+      ${hasRec?`
+      <div class="sec-label sec-rec"><span class="tag">RECOMMEND</span> 추천 · 미래 lot (역산) ${d.chosen_pt?('· '+d.chosen_pt):''}</div>
+      <div class="bow-band"><span class="lbl">예상 BOW</span><span class="bow-val">${bow.toFixed(2)}</span>
+        <span class="bow-range">${plo} ~ ${phi} µm</span>
+        <span class="bow-target">Target <b>${TARGET}</b> · 최근 wire <code>${d.wire||''}</code></span></div>
+      <div class="profiles">
+        <div class="profile"><h3><span class="sw" style="background:var(--frame)"></span>① Frame Temp 추천${d.frame_bow_rec!=null?`<span class="rec-bow">추천 사용시 예상 BOW <b>${d.frame_bow_rec.toFixed(3)}</b></span>`:''}</h3>
+          <div class="unit">rec_set_frame_temp · °C · 0→100pct</div>${lineChart(recFrame,'#0f5c8c','#cfe2ef')}${tbl(recFrame)}</div>
+        <div class="profile"><h3><span class="sw" style="background:var(--slurry)"></span>② Slurry Temp 추천${d.slurry_bow_rec!=null?`<span class="rec-bow">추천 사용시 예상 BOW <b>${d.slurry_bow_rec.toFixed(3)}</b></span>`:''}</h3>
+          <div class="unit">rec_set_slurry_temp · °C · 0→100pct</div>${lineChart(recSlurry,'#b8531f','#f0d9c9')}${tbl(recSlurry)}</div>
+      </div>`:''}
+      ${buildActualHTML(d.actual, recFrame, recSlurry)}
+    </div>
   </section>`;
 }
 // 요약 테이블: 장비×process_time별 추천/실제 비교 + 스펙 이탈 강조 + 클릭 이동
@@ -1053,34 +1071,29 @@ function summaryTable(records){
       else if(lastBow < SPEC_LO+0.1 || lastBow > SPEC_HI-0.1){status='warn'; statusTxt='주의';}
     } else {status='none'; statusTxt='실제 없음';}
 
-    // process_time별로 행 생성
-    const pts = d.pts || [{process_time:'', bow:d.bow, rec_frame:d.rec_frame, waf:d.waf, actual:d.actual}];
-    pts.forEach(p=>{
-      const lo=(p.bow-RANGE).toFixed(2), hi=(p.bow+RANGE).toFixed(2);
-      // 추천 vs 실측 판정: Frame 50,60pct 구간 평균의 delta (전제: start 28도)
-      let recVerdict='—', recStatus='none', recDiff=null;
-      // 이 process_time의 실측 frame (최신 lot) 50,60pct 평균
-      let actFrameAvg=null;
-      const pa = p.actual || d.actual;
-      if(pa && pa.blocks && pa.blocks.length){
-        const lastBlk=pa.blocks[pa.blocks.length-1];
-        const frameLots=lastBlk.frame||[];
-        if(frameLots.length) actFrameAvg=avg5060(frameLots[frameLots.length-1].prof);
-      }
-      const recAvg=avg5060(p.rec_frame);
-      if(actFrameAvg!=null && recAvg!=null){
-        recDiff=Math.abs(recAvg-actFrameAvg);
-        if(recDiff>=0.3){recVerdict='변경 요망'; recStatus='out';}
-        else{recVerdict='트렌드 유지'; recStatus='ok';}
-      }
-      rows.push({eqp:d.eqp, pt:p.process_time||'—', bow:p.bow, lo, hi, waf:p.waf,
-                 lastBow, status, statusTxt, recVerdict, recStatus, recDiff});
-    });
+    // 장비당 1행 (마지막 가공시간 추천 기준)
+    const bow = (d.bow!=null?d.bow:TARGET);
+    const lo=(bow-RANGE).toFixed(2), hi=(bow+RANGE).toFixed(2);
+    // 추천 판정: Frame 50,60pct 구간 평균 delta (통합 실측 최신 lot 기준)
+    let recVerdict='—', recStatus='none', recDiff=null;
+    let actFrameAvg=null;
+    if(d.actual && d.actual.blocks && d.actual.blocks.length){
+      const lastBlk=d.actual.blocks[d.actual.blocks.length-1];
+      const frameLots=lastBlk.frame||[];
+      if(frameLots.length) actFrameAvg=avg5060(frameLots[frameLots.length-1].prof);
+    }
+    const recAvg=avg5060(d.rec_frame);
+    if(actFrameAvg!=null && recAvg!=null){
+      recDiff=Math.abs(recAvg-actFrameAvg);
+      if(recDiff>=0.3){recVerdict='변경 요망'; recStatus='out';}
+      else{recVerdict='트렌드 유지'; recStatus='ok';}
+    }
+    rows.push({eqp:d.eqp, bow, lo, hi, waf:d.waf||0,
+               lastBow, status, statusTxt, recVerdict, recStatus, recDiff});
   });
   const body = rows.map(r=>`
     <tr class="sum-row sum-${r.status}" onclick="document.getElementById('eqp-${r.eqp}').scrollIntoView({behavior:'smooth',block:'start'})">
       <td class="sum-eqp">${r.eqp}</td>
-      <td class="sum-status"><span class="pt-badge-sm">${r.pt}</span></td>
       <td class="sum-num">${r.bow.toFixed(2)}</td>
       <td class="sum-num sum-range">${r.lo}~${r.hi}</td>
       <td class="sum-num">${r.waf}</td>
@@ -1095,7 +1108,7 @@ function summaryTable(records){
     <div class="sum-title">장비별 요약 <span class="sum-hint">행 클릭 → 상세로 이동</span></div>
     <table class="summary-tbl">
       <thead><tr>
-        <th>장비</th><th>가공시간</th><th>예상 BOW</th><th>예상 범위</th><th>WAF</th>
+        <th>장비</th><th>예상 BOW</th><th>예상 범위</th><th>WAF</th>
         <th>실제 최근 BOW</th><th>상태</th><th>추천 차이</th><th>추천 판정</th><th></th>
       </tr></thead>
       <tbody>${body}</tbody>
