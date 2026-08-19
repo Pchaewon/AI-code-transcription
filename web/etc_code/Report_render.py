@@ -867,8 +867,12 @@ function barSlotChart(blocks,color,unit){
   const trace={
     x:xs, y:ys, type:'bar', marker:{color:colors}, customdata:cd,
     text:texts, textposition:'outside', textfont:{size:12.5,family:'JetBrains Mono'},
+    cliponaxis:false,   // 레이블이 축 경계에 잘리지 않게
     hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>WG LT %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
   };
+  // y축 상단 여유 (막대 위 레이블 공간)
+  const _maxV=Math.max(...ys.filter(v=>v!=null&&!isNaN(v)),0);
+  const _yTop=_maxV>0?_maxV*1.18:1;
 
   // x축 tick: 점마다 날짜/blk/WG LT
   const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[0]||''}<br>${c[3]||''}<br>${c[2]?('WG LT '+c[2]):''}`);
@@ -893,7 +897,7 @@ function barSlotChart(blocks,color,unit){
     margin:{l:44,r:8,t:14,b:200},
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
-    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}},
+    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5},range:[0,_yTop]},
     shapes:shapes, annotations:annos, showlegend:false,
   });
   return __newChartDivFull([trace],layout,360);
