@@ -1,388 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-build_recommend_report.py  (추천 + 실제 통합판)
-─────────────────────────────────────────
-두 소스를 읽어 장비별 리포트 HTML 생성.
-
-  recommend_future.csv → ①②③ 추천 (rec_ 온도, pred_bow)   [미래·역산]
-  field_store.csv      → 실제 영역                          [과거·실측]
-      · Bow/Warp Trend (최근 N wire, Total)
-      · X-Factor: 실제 frame/slurry 온도 프로파일 (최근 N wire 겹침)
-      · X-Factor: 단일값 조건 (ingot/wait/warmup) 최근 N wire 추세
-
-  두 소스는 eqp(장비)로 매칭. field_store 없으면 추천만 표시.
-
-사용:
-  python build_recommend_report.py
-  python build_recommend_report.py ./recommend_future.csv ./data/field_store.csv ./reports/recipe.html
-"""
-import sys
-import os
-import json
-import pandas as pd
-import numpy as np
-from datetime import datetime
-
-# ── 설정 ──
-PCTS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-RANGE = 0.15
-TARGET_BOW = 1.25
-SPEC_LO, SPEC_HI = 1.0, 1.5      # 양품 스펙
-PROCESS_TIME = '13.3Hr'
-RECENT_N = 10                    # 실제 trend/프로파일에 쓸 최근 lot 수
-
-REC_FRAME = 'rec_set_frame_temp_{p}pct'
-REC_SLURRY = 'rec_set_slurry_temp_{p}pct'
-ACT_FRAME = 'FRAME_IN_TEMP_{p}pct'        # 실제 입구온도 (trace 실측)
-ACT_SLURRY = 'SLURRY_IN_TEMP_{p}pct'
-ACT_WG_L = 'SHIFT_AMOUNT_WIREGUIDE_L_{p}pct'   # wire guide L 프로파일
-ACT_WG_R = 'SHIFT_AMOUNT_WIREGUIDE_R_{p}pct'   # wire guide R 프로파일
-
-STORE_CFG = {
-    'eqp':  'eqp_nm_3200',
-    'wire': 'fdc_new_wire_id',
-    'date': 'date_3200',
-    'bow':  'avg_bow_bf_total',
-    'warp': 'avg_warp_bf_total',
-    'bow_seed': 'avg_bow_bf_seed',
-    'bow_mid':  'avg_bow_bf_mid',
-    'bow_tail': 'avg_bow_bf_tail',
-    'warp_seed':'avg_warp_bf_seed',
-    'warp_mid': 'avg_warp_bf_mid',
-    'warp_tail':'avg_warp_bf_tail',
-    'ingot':'fdc_ingot_len',
-    'wait': 'fdc_wait_time',
-    'warm': 'fdc_warm_up_time',
-    'lifetime': 'WIREGUIDE_LIFE_TIME',
-    'blk': 'BLK_NO',
-    'pt': 'process_time',
-}
-
-
-def _profile(row, tmpl):
-    out = []
-    for p in PCTS:
-        v = row.get(tmpl.format(p=p))
-        out.append(None if pd.isna(v) else round(float(v), 2))
-    return out
-
-
-def _pred_bow(row):
-    for c in ['frame_pred_bow', 'slurry_pred_bow']:
-        if c in row.index and pd.notna(row[c]):
-            return round(float(row[c]), 3)
-    return TARGET_BOW
-
-
-def load_recommend(csv_path):
-    df = pd.read_csv(csv_path)
-    eqp_col = 'eqp' if 'eqp' in df.columns else df.columns[0]
-    has_pt = 'process_time' in df.columns
-    recs = {}
-    for _, r in df.iterrows():
-        frame = _profile(r, REC_FRAME)
-        slurry = _profile(r, REC_SLURRY)
-        if all(v is None for v in frame) and all(v is None for v in slurry):
-            print(f"  ⚠ {r.get(eqp_col)}: 추천 온도 없음 — 스킵")
-            continue
-        eqp = str(r.get(eqp_col, '?'))
-        pt_val = str(r.get('process_time', '')) if has_pt else ''
-
-        def _numval(col):
-            v = r.get(col)
-            return round(float(v), 3) if v is not None and pd.notna(v) else None
-
-        rec_one = {
-            'process_time': pt_val,
-            'waf': int(r['n_waf_used']) if 'n_waf_used' in r.index
-                   and pd.notna(r['n_waf_used']) else 0,
-            'wire': str(r.get('latest_wire', '')),
-            'bow': _pred_bow(r),
-            'rec_frame': [v if v is not None else 0 for v in frame],
-            'rec_slurry': [v if v is not None else 0 for v in slurry],
-            # 추천 레시피를 x인자로 넣었을 때 예상 BOW (frame/slurry 각각)
-            'frame_bow_rec': _numval('frame_bow_with_recipe'),
-            'slurry_bow_rec': _numval('slurry_bow_with_recipe'),
-        }
-
-        # 장비별로 process_time 목록 누적
-        if eqp not in recs:
-            recs[eqp] = {'eqp': eqp, 'pts': []}
-        recs[eqp]['pts'].append(rec_one)
-
-    # 대표값(카드 상단·요약용): 첫 process_time 기준으로 평탄화
-    for eqp, d in recs.items():
-        first = d['pts'][0]
-        d['waf'] = first['waf']
-        d['wire'] = first['wire']
-        d['bow'] = first['bow']
-        d['rec_frame'] = first['rec_frame']
-        d['rec_slurry'] = first['rec_slurry']
-    return recs
-
-
-def load_actuals(store_path):
-    """field_store에서 장비별 최근 N wire의 실제값 추출."""
-    if not os.path.exists(store_path):
-        print(f"  ⚠ field_store 없음: {store_path} — 실제 영역 생략")
-        return {}
-    df = pd.read_csv(store_path)
-    C = STORE_CFG
-    if C['eqp'] not in df.columns:
-        print(f"  ⚠ {C['eqp']} 컴럼 없음 — 실제 영역 생략")
-        return {}
-
-    # 대소문자 무관 컬럼 조회 (FRAME_IN_TEMP_0pct vs frame_in_temp_0pct 등)
-    col_lookup = {c.lower(): c for c in df.columns}
-    def realcol(name):
-        return col_lookup.get(name.lower())
-    MISSING_SENTINELS = {-1.0, -1, -999, -9999}  # placeholder 결측값
-
-    acts = {}
-    LOT = 'lot_id'
-    has_pt = 'process_time' in df.columns
-    # eqp 단위로만 그룹 (가공시간 통합 — process_time은 lot별 속성으로 유지)
-    group_keys = [C['eqp']]
-    for gk, g in df.groupby(group_keys):
-        eqp = gk[0] if isinstance(gk, tuple) else gk
-        pt_val = ''  # 통합이므로 대표 pt 없음
-        acts_key = str(eqp)
-
-        if C['date'] in g.columns:
-            g = g.sort_values(C['date'])
-
-        wire_col = C['wire']
-        has_lot = LOT in g.columns
-
-        # 최근 N lot 선택 (lot 등장 순서 기준, 최근 것)
-        if has_lot:
-            lot_order = list(dict.fromkeys(g[LOT].astype(str).tolist()))
-            recent_lots = set(lot_order[-RECENT_N:])
-            # 최근 lot만 남기고, 그 lot이 속한 wire 순서 유지
-            g = g[g[LOT].astype(str).isin(recent_lots)]
-            recent_wires = list(dict.fromkeys(g[wire_col].astype(str).tolist()))
-        else:
-            # lot 없으면 기존처럼 wire 기준
-            wire_order = list(dict.fromkeys(g[wire_col].astype(str).tolist()))
-            recent_wires = wire_order[-RECENT_N:]
-
-        def lot_profiles(sub, tmpl):
-            """sub(한 wire의 행들)에서 lot별 프로파일 리스트 반환."""
-            out = []
-            def clean(v):
-                if pd.isna(v) or float(v) in MISSING_SENTINELS:
-                    return None
-                return round(float(v), 2)
-            if has_lot:
-                for lot, lg in sub.groupby(LOT, sort=False):
-                    prof = []
-                    for p in PCTS:
-                        rc = realcol(tmpl.format(p=p))
-                        v = lg[rc].mean() if rc else None
-                        prof.append(clean(v) if v is not None else None)
-                    if not all(v is None for v in prof):
-                        out.append({'lot': str(lot),
-                                    'prof': [v if v is not None else 0 for v in prof]})
-            else:
-                for _, r in sub.iterrows():
-                    prof = []
-                    for p in PCTS:
-                        rc = realcol(tmpl.format(p=p))
-                        v = r.get(rc) if rc else None
-                        prof.append(clean(v) if v is not None else None)
-                    if not all(v is None for v in prof):
-                        out.append({'lot': '',
-                                    'prof': [v if v is not None else 0 for v in prof]})
-            return out
-
-        def lot_scalars(sub, name):
-            """lot별 단일값 리스트."""
-            key = C[name]
-            out = []
-            if has_lot:
-                for lot, lg in sub.groupby(LOT, sort=False):
-                    v = lg[key].mean() if key in lg.columns else None
-                    out.append({'lot': str(lot),
-                                'val': round(float(v), 1) if pd.notna(v) else None})
-            else:
-                for _, r in sub.iterrows():
-                    v = r.get(key)
-                    out.append({'lot': '',
-                                'val': round(float(v), 1) if pd.notna(v) else None})
-            return out
-
-        # wire별로 lot 계층 구성
-        wire_blocks = []      # [{wire, frame:[{lot,prof}], slurry:[...], ...}]
-        bow_wires = []
-        # total/seed/mid/tail 4개 계열 × bow/warp
-        series = {k: [] for k in
-                  ['bow', 'bow_seed', 'bow_mid', 'bow_tail',
-                   'warp', 'warp_seed', 'warp_mid', 'warp_tail']}
-        def lot_scalars_col(sub, col_nm):
-            """지정 컬럼의 lot별 단일값 리스트."""
-            out = []
-            if has_lot and col_nm and col_nm in sub.columns:
-                for lot, lg in sub.groupby(LOT, sort=False):
-                    v = lg[col_nm].mean()
-                    out.append({'lot': str(lot),
-                                'val': round(float(v), 3) if pd.notna(v) else None})
-            elif col_nm and col_nm in sub.columns:
-                for _, r in sub.iterrows():
-                    v = r.get(col_nm)
-                    out.append({'lot': '',
-                                'val': round(float(v), 3) if pd.notna(v) else None})
-            return out
-
-        def lot_strs_col(sub, col_nm, as_int=False):
-            """지정 컬럼의 lot별 대표 문자열 리스트 (lot 순서).
-            as_int=True면 숫자를 정수 문자열로 (250.0 → '250')."""
-            def fmt(v):
-                if pd.isna(v):
-                    return ''
-                if as_int:
-                    try:
-                        return str(int(round(float(v))))
-                    except (ValueError, TypeError):
-                        return str(v)
-                return str(v)
-            out = []
-            real = None
-            if col_nm:
-                low = {c.lower(): c for c in sub.columns}
-                real = low.get(col_nm.lower())
-            if has_lot and real:
-                for lot, lg in sub.groupby(LOT, sort=False):
-                    out.append(fmt(lg[real].iloc[0]))
-            elif real:
-                for _, r in sub.iterrows():
-                    out.append(fmt(r.get(real)))
-            return out
-
-        def wire_date(sub):
-            """wire의 대표 날짜(첫 행)를 YYMMDD HH로."""
-            dc = C.get('date')
-            if not dc or dc not in sub.columns or len(sub) == 0:
-                return ''
-            raw = str(sub[dc].iloc[0])
-            digits = ''.join(ch for ch in raw if ch.isdigit())
-            if len(digits) >= 10:
-                yy, mm, dd = digits[2:4], digits[4:6], digits[6:8]
-                hh = digits[8:10]
-                return f"{yy}{mm}{dd} {hh}"
-            return raw[:11]
-
-        for w in recent_wires:
-            sub = g[g[wire_col].astype(str) == w]
-            wire_blocks.append({
-                'wire': w,
-                'date': wire_date(sub),
-                'lifetimes': lot_strs_col(sub, C.get('lifetime'), as_int=True),
-                'blks':      lot_strs_col(sub, C.get('blk')),
-                'pts':       lot_strs_col(sub, C.get('pt')),
-                'frame':  lot_profiles(sub, ACT_FRAME),
-                'slurry': lot_profiles(sub, ACT_SLURRY),
-                'wg_l':   lot_profiles(sub, ACT_WG_L),
-                'wg_r':   lot_profiles(sub, ACT_WG_R),
-                'ingot':  lot_scalars(sub, 'ingot'),
-                'wait':   lot_scalars(sub, 'wait'),
-                'warm':   lot_scalars(sub, 'warm'),
-                # bow/warp 4계열 lot별 단일값 (wire>lot 트렌드용)
-                'bow':       lot_scalars_col(sub, C.get('bow')),
-                'bow_seed':  lot_scalars_col(sub, C.get('bow_seed')),
-                'bow_mid':   lot_scalars_col(sub, C.get('bow_mid')),
-                'bow_tail':  lot_scalars_col(sub, C.get('bow_tail')),
-                'warp':      lot_scalars_col(sub, C.get('warp')),
-                'warp_seed': lot_scalars_col(sub, C.get('warp_seed')),
-                'warp_mid':  lot_scalars_col(sub, C.get('warp_mid')),
-                'warp_tail': lot_scalars_col(sub, C.get('warp_tail')),
-            })
-            # (기존 wire 단위 series도 유지 — 호환용)
-            for key in series:
-                col_nm = C.get(key)
-                if col_nm and col_nm in sub.columns:
-                    v = sub[col_nm].mean()
-                    series[key].append(round(float(v), 3) if pd.notna(v) else None)
-                else:
-                    series[key].append(None)
-            bow_wires.append(w)
-
-        # 실제 표시된 lot 총수 (blocks의 frame lot 합)
-        n_lots = sum(len(b.get('frame', [])) for b in wire_blocks)
-        # 마지막(최근) 가공시간: 마지막 wire block의 마지막 lot pt
-        last_pt = ''
-        for b in reversed(wire_blocks):
-            pts_list = b.get('pts', [])
-            if pts_list:
-                last_pt = str(pts_list[-1])
-                break
-        acts[acts_key] = {
-            'eqp': str(eqp),
-            'process_time': pt_val,
-            'last_process_time': last_pt,
-            'wires': bow_wires,
-            'n_lots': n_lots,
-            'bow':  series['bow'],
-            'warp': series['warp'],
-            'bow_seed': series['bow_seed'], 'bow_mid': series['bow_mid'], 'bow_tail': series['bow_tail'],
-            'warp_seed': series['warp_seed'], 'warp_mid': series['warp_mid'], 'warp_tail': series['warp_tail'],
-            'blocks': wire_blocks,   # wire>lot 계층
-            'has_lot': has_lot,
-        }
-    return acts
-
-
-def merge(recs, acts):
-    """가공시간 통합 실측 + 마지막 끝난 가공시간의 추천만 선택."""
-    out = []
-    for eqp, r in recs.items():
-        a = acts.get(str(eqp))
-        r['actual'] = a
-        # 마지막 끝난 가공시간
-        last_pt = a['last_process_time'] if a else ''
-        # 그 가공시간에 해당하는 추천 1개 선택
-        chosen = None
-        for p in r.get('pts', []):
-            if str(p.get('process_time', '')) == last_pt:
-                chosen = p
-                break
-        if chosen is None and r.get('pts'):
-            chosen = r['pts'][-1]  # 못 찾으면 마지막 pts
-        # 대표 추천값을 카드 상단용으로 평탄화
-        if chosen:
-            r['chosen_pt'] = chosen.get('process_time', '')
-            r['bow'] = chosen.get('bow', r.get('bow'))
-            r['wire'] = chosen.get('wire', r.get('wire'))
-            r['rec_frame'] = chosen.get('rec_frame')
-            r['rec_slurry'] = chosen.get('rec_slurry')
-            r['frame_bow_rec'] = chosen.get('frame_bow_rec')
-            r['slurry_bow_rec'] = chosen.get('slurry_bow_rec')
-            r['waf'] = chosen.get('waf', r.get('waf'))
-        out.append(r)
-    return out
-
-
-def render_html(records):
-    stamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-    frame_start = records[0]['rec_frame'][0] if records else 28.0
-    # 실제로 그려지는 lot 수 (장비별 최댓값)
-    lot_counts = [r['actual'].get('n_lots', 0)
-                  for r in records if r.get('actual')]
-    actual_max_wire = max(lot_counts) if lot_counts else 0
-    return (TEMPLATE
-            .replace('__DATA__', json.dumps(records, ensure_ascii=False))
-            .replace('__PCTS__', json.dumps(PCTS))
-            .replace('__RANGE__', str(RANGE))
-            .replace('__NEQP__', str(len(records)))
-            .replace('__TARGET__', str(TARGET_BOW))
-            .replace('__SPECLO__', str(SPEC_LO))
-            .replace('__SPECHI__', str(SPEC_HI))
-            .replace('__PTIME__', PROCESS_TIME)
-            .replace('__FSTART__', str(frame_start))
-            .replace('__RECENTN__', str(actual_max_wire))
-            .replace('__STAMP__', stamp))
-
-
-TEMPLATE = r'''<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -487,7 +103,7 @@ TEMPLATE = r'''<!DOCTYPE html>
   .bow-range{font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--frame);font-weight:700;}
   .bow-target{margin-left:auto;font-size:12px;color:var(--ink-faint);}
   .bow-target b{color:var(--target);font-weight:700;}
-  .profiles{display:grid;grid-template-columns:1fr;gap:0;}
+  .profiles{display:grid;grid-template-columns:1fr 1fr;gap:0;}
   @media(max-width:760px){.profiles{grid-template-columns:1fr;}}
   .profile{padding:20px 24px;}
   .profile:first-child{border-right:1px solid var(--panel-line);}
@@ -543,25 +159,25 @@ if(typeof Plotly==='undefined'){document.write('<script src="https://cdnjs.cloud
   <h1>온도 Recipe 추천 리포트</h1>
   <p class="sub">위쪽 <b>추천</b>(미래·역산), 아래쪽 <b>실제 추이</b>(최근 wire·실측). 최근 상태를 보고 추천 수용을 판단합니다.</p>
   <div class="meta-row">
-    <div class="meta-item"><span class="k">Process Time</span><span class="v">__PTIME__</span></div>
-    <div class="meta-item"><span class="k">Target BOW</span><span class="v">__TARGET__ µm</span></div>
-    <div class="meta-item"><span class="k">양품 스펙</span><span class="v">__SPECLO__ ~ __SPECHI__ µm</span></div>
-    <div class="meta-item"><span class="k">생성 시각</span><span class="v">__STAMP__</span></div>
+    <div class="meta-item"><span class="k">Process Time</span><span class="v">13.3Hr</span></div>
+    <div class="meta-item"><span class="k">Target BOW</span><span class="v">1.25 µm</span></div>
+    <div class="meta-item"><span class="k">양품 스펙</span><span class="v">1.0 ~ 1.5 µm</span></div>
+    <div class="meta-item"><span class="k">생성 시각</span><span class="v">2026-08-19 08:19</span></div>
   </div>
 </div></header>
 <div class="wrap">
   <div class="summary">
-    <div class="stat"><div class="sk">추천 장비</div><div class="sv">__NEQP__<span class="su">/ 10대</span></div></div>
-    <div class="stat"><div class="sk">Target BOW</div><div class="sv">__TARGET__<span class="su">µm</span></div></div>
-    <div class="stat"><div class="sk">예상 범위</div><div class="sv">±__RANGE__<span class="su">µm</span></div></div>
-    <div class="stat"><div class="sk">실제 추이(최대)</div><div class="sv">__RECENTN__<span class="su">lot</span></div></div>
+    <div class="stat"><div class="sk">추천 장비</div><div class="sv">1<span class="su">/ 10대</span></div></div>
+    <div class="stat"><div class="sk">Target BOW</div><div class="sv">1.25<span class="su">µm</span></div></div>
+    <div class="stat"><div class="sk">예상 범위</div><div class="sv">±0.15<span class="su">µm</span></div></div>
+    <div class="stat"><div class="sk">실제 추이(최대)</div><div class="sv">6<span class="su">lot</span></div></div>
   </div>
   <div id="cards"></div>
 </div>
-<div class="foot"><span>WIRESAW_APC · DUAL_MODEL · SLSQP_INVERSE + FIELD_ACTUALS</span><span>GENERATED __STAMP__</span></div>
+<div class="foot"><span>WIRESAW_APC · DUAL_MODEL · SLSQP_INVERSE + FIELD_ACTUALS</span><span>GENERATED 2026-08-19 08:19</span></div>
 <script>
-const PCTS=__PCTS__, DATA=__DATA__, RANGE=__RANGE__, TARGET=__TARGET__;
-const SPEC_LO=__SPECLO__, SPEC_HI=__SPECHI__;
+const PCTS=[0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100], DATA=[{"eqp": "BSWS37", "pts": [{"process_time": "13.3Hr", "waf": 3, "wire": "W1", "bow": 1.25, "rec_frame": [28.5, 28.59, 28.68, 28.74, 28.79, 28.8, 28.79, 28.74, 28.68, 28.59, 28.5], "rec_slurry": [24.0, 24.2, 24.4, 24.6, 24.8, 25.0, 25.2, 25.4, 25.6, 25.8, 26.0], "frame_bow_rec": 1.243, "slurry_bow_rec": 1.258}], "waf": 3, "wire": "W1", "bow": 1.25, "rec_frame": [28.5, 28.59, 28.68, 28.74, 28.79, 28.8, 28.79, 28.74, 28.68, 28.59, 28.5], "rec_slurry": [24.0, 24.2, 24.4, 24.6, 24.8, 25.0, 25.2, 25.4, 25.6, 25.8, 26.0], "actual": {"eqp": "BSWS37", "process_time": "", "last_process_time": "13.3Hr", "wires": ["LGA202607634", "LGA202607635", "LGA202607636"], "n_lots": 6, "bow": [1.2, 1.25, 1.3], "warp": [8.0, 9.0, 10.0], "bow_seed": [1.3, 1.3, 1.3], "bow_mid": [1.25, 1.25, 1.25], "bow_tail": [1.2, 1.2, 1.2], "warp_seed": [9.0, 9.0, 9.0], "warp_mid": [8.0, 8.0, 8.0], "warp_tail": [7.0, 7.0, 7.0], "blocks": [{"wire": "LGA202607634", "date": "260801 14", "lifetimes": ["250", "267"], "blks": ["BLK7001", "BLK7002"], "pts": ["13.3Hr", "13.3Hr"], "frame": [{"lot": "LGA202607634-L0", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}, {"lot": "LGA202607634-L1", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}], "slurry": [{"lot": "LGA202607634-L0", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}, {"lot": "LGA202607634-L1", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}], "wg_l": [{"lot": "LGA202607634-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607634-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "wg_r": [{"lot": "LGA202607634-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607634-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "ingot": [{"lot": "LGA202607634-L0", "val": 205.0}, {"lot": "LGA202607634-L1", "val": 205.0}], "wait": [{"lot": "LGA202607634-L0", "val": 32.0}, {"lot": "LGA202607634-L1", "val": 32.0}], "warm": [{"lot": "LGA202607634-L0", "val": 7.0}, {"lot": "LGA202607634-L1", "val": 7.0}], "bow": [{"lot": "LGA202607634-L0", "val": 1.2}, {"lot": "LGA202607634-L1", "val": 1.2}], "bow_seed": [{"lot": "LGA202607634-L0", "val": 1.3}, {"lot": "LGA202607634-L1", "val": 1.3}], "bow_mid": [{"lot": "LGA202607634-L0", "val": 1.25}, {"lot": "LGA202607634-L1", "val": 1.25}], "bow_tail": [{"lot": "LGA202607634-L0", "val": 1.2}, {"lot": "LGA202607634-L1", "val": 1.2}], "warp": [{"lot": "LGA202607634-L0", "val": 8.0}, {"lot": "LGA202607634-L1", "val": 8.0}], "warp_seed": [{"lot": "LGA202607634-L0", "val": 9.0}, {"lot": "LGA202607634-L1", "val": 9.0}], "warp_mid": [{"lot": "LGA202607634-L0", "val": 8.0}, {"lot": "LGA202607634-L1", "val": 8.0}], "warp_tail": [{"lot": "LGA202607634-L0", "val": 7.0}, {"lot": "LGA202607634-L1", "val": 7.0}]}, {"wire": "LGA202607635", "date": "260802 14", "lifetimes": ["284", "301"], "blks": ["BLK7003", "BLK7004"], "pts": ["13.3Hr", "13.3Hr"], "frame": [{"lot": "LGA202607635-L0", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}, {"lot": "LGA202607635-L1", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}], "slurry": [{"lot": "LGA202607635-L0", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}, {"lot": "LGA202607635-L1", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}], "wg_l": [{"lot": "LGA202607635-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607635-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "wg_r": [{"lot": "LGA202607635-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607635-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "ingot": [{"lot": "LGA202607635-L0", "val": 205.0}, {"lot": "LGA202607635-L1", "val": 205.0}], "wait": [{"lot": "LGA202607635-L0", "val": 32.0}, {"lot": "LGA202607635-L1", "val": 32.0}], "warm": [{"lot": "LGA202607635-L0", "val": 7.0}, {"lot": "LGA202607635-L1", "val": 7.0}], "bow": [{"lot": "LGA202607635-L0", "val": 1.25}, {"lot": "LGA202607635-L1", "val": 1.25}], "bow_seed": [{"lot": "LGA202607635-L0", "val": 1.3}, {"lot": "LGA202607635-L1", "val": 1.3}], "bow_mid": [{"lot": "LGA202607635-L0", "val": 1.25}, {"lot": "LGA202607635-L1", "val": 1.25}], "bow_tail": [{"lot": "LGA202607635-L0", "val": 1.2}, {"lot": "LGA202607635-L1", "val": 1.2}], "warp": [{"lot": "LGA202607635-L0", "val": 9.0}, {"lot": "LGA202607635-L1", "val": 9.0}], "warp_seed": [{"lot": "LGA202607635-L0", "val": 9.0}, {"lot": "LGA202607635-L1", "val": 9.0}], "warp_mid": [{"lot": "LGA202607635-L0", "val": 8.0}, {"lot": "LGA202607635-L1", "val": 8.0}], "warp_tail": [{"lot": "LGA202607635-L0", "val": 7.0}, {"lot": "LGA202607635-L1", "val": 7.0}]}, {"wire": "LGA202607636", "date": "260803 14", "lifetimes": ["318", "335"], "blks": ["BLK7005", "BLK7006"], "pts": ["13.3Hr", "13.3Hr"], "frame": [{"lot": "LGA202607636-L0", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}, {"lot": "LGA202607636-L1", "prof": [28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6, 28.6]}], "slurry": [{"lot": "LGA202607636-L0", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}, {"lot": "LGA202607636-L1", "prof": [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0]}], "wg_l": [{"lot": "LGA202607636-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607636-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "wg_r": [{"lot": "LGA202607636-L0", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, {"lot": "LGA202607636-L1", "prof": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}], "ingot": [{"lot": "LGA202607636-L0", "val": 205.0}, {"lot": "LGA202607636-L1", "val": 205.0}], "wait": [{"lot": "LGA202607636-L0", "val": 32.0}, {"lot": "LGA202607636-L1", "val": 32.0}], "warm": [{"lot": "LGA202607636-L0", "val": 7.0}, {"lot": "LGA202607636-L1", "val": 7.0}], "bow": [{"lot": "LGA202607636-L0", "val": 1.3}, {"lot": "LGA202607636-L1", "val": 1.3}], "bow_seed": [{"lot": "LGA202607636-L0", "val": 1.3}, {"lot": "LGA202607636-L1", "val": 1.3}], "bow_mid": [{"lot": "LGA202607636-L0", "val": 1.25}, {"lot": "LGA202607636-L1", "val": 1.25}], "bow_tail": [{"lot": "LGA202607636-L0", "val": 1.2}, {"lot": "LGA202607636-L1", "val": 1.2}], "warp": [{"lot": "LGA202607636-L0", "val": 10.0}, {"lot": "LGA202607636-L1", "val": 10.0}], "warp_seed": [{"lot": "LGA202607636-L0", "val": 9.0}, {"lot": "LGA202607636-L1", "val": 9.0}], "warp_mid": [{"lot": "LGA202607636-L0", "val": 8.0}, {"lot": "LGA202607636-L1", "val": 8.0}], "warp_tail": [{"lot": "LGA202607636-L0", "val": 7.0}, {"lot": "LGA202607636-L1", "val": 7.0}]}], "has_lot": true}, "chosen_pt": "13.3Hr", "frame_bow_rec": 1.243, "slurry_bow_rec": 1.258}], RANGE=0.15, TARGET=1.25;
+const SPEC_LO=1.0, SPEC_HI=1.5;
 
 // ─── Plotly 차트 큐 ───
 // 차트 함수는 <div>를 리턴하고 그릴 정보를 큐에 쌓음. 카드 렌더 후 flush.
@@ -604,7 +220,7 @@ function lineChart(values,color,soft,opts){
     fill:'tozeroy', fillcolor:soft?(soft+'99'):'rgba(0,0,0,0.05)',
     hovertemplate:'%{x}pct: <b>%{y}</b><extra></extra>',
   };
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:9}};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
   if(opts.fixLo!=null && opts.fixHi!=null){
     yax.range=[opts.fixLo,opts.fixHi];
     if(opts.major) yax.dtick=opts.major;
@@ -613,7 +229,7 @@ function lineChart(values,color,soft,opts){
   }
   const layout=__layout(180,{
     margin:{l:36,r:8,t:8,b:28},
-    xaxis:{dtick:20,tickfont:{size:9,family:'JetBrains Mono'},showgrid:false,zeroline:false,title:{text:'pct',font:{size:9}}},
+    xaxis:{dtick:20,tickfont:{size:11,family:'JetBrains Mono'},showgrid:false,zeroline:false,title:{text:'pct',font:{size:11}}},
     yaxis:yax,
   });
   return __newChartDivFull([trace],layout,180);
@@ -686,9 +302,9 @@ function horizonChart(blocks,color,recProf,opts){
     bracket(start+0.05, end+0.95, WIRE_BR_Y);
     const w=(blk.wire||'').toString();
     const wShort=w;  // 전체 표시
-    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
     bracket(start+0.05, end+0.95, DATE_BR_Y);
-    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
   });
   // 스펙/target (Bow류 아니면 없음)
   if(opts.specLo!=null){
@@ -698,15 +314,15 @@ function horizonChart(blocks,color,recProf,opts){
     shapes.push({type:'line',xref:'paper',x0:0,x1:1,y0:opts.target,y1:opts.target,line:{color:'#1a1a1a',width:1,dash:'dash'}});
   }
 
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
   const layout=__layout(280,{
     margin:{l:40,r:8,t:8,b:120},
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.1,lotIndex+0.1]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:(recProf&&recProf.length)?true:false,
-    legend:{orientation:'h',x:0,y:1.10,font:{size:9}},
+    legend:{orientation:'h',x:0,y:1.10,font:{size:11}},
   });
   return __newChartDivFull(traces,layout,280);
 }
@@ -809,22 +425,22 @@ function lotTrendChart(blocks,color,opts){
     const w=(blk.wire||'').toString();
     const wShort=w;  // 전체 표시
     annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,
-                font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+                font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
     // 날짜 브래킷 + 날짜
     bracket(start-0.35, end+0.35, DATE_BR_Y);
     annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,
-                font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+                font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
   });
 
-  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false};
+  const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
   const layout=__layout(280,{
     margin:{l:40,r:8,t:8,b:120},   // 4층 라벨 공간
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.6,xs[xs.length-1]+0.6]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:Object.keys(byPt).length>1,
-    legend:{orientation:'h',x:0,y:1.10,font:{size:9}},
+    legend:{orientation:'h',x:0,y:1.10,font:{size:11}},
   });
   return __newChartDivFull(traces,layout,280);
 }
@@ -849,7 +465,7 @@ function barSlotChart(blocks,color,unit){
 
   const trace={
     x:xs, y:ys, type:'bar', marker:{color:colors}, customdata:cd,
-    text:texts, textposition:'outside', textfont:{size:8,family:'JetBrains Mono'},
+    text:texts, textposition:'outside', textfont:{size:10,family:'JetBrains Mono'},
     hovertemplate:'%{customdata[4]}<br>날짜 %{customdata[0]}<br>wire %{customdata[1]}<br>life %{customdata[2]}<br>blk %{customdata[3]}<br>값 <b>%{y}</b><extra></extra>',
   };
 
@@ -869,16 +485,16 @@ function barSlotChart(blocks,color,unit){
     const end=start+cnt-1, mid=(start+end)/2;
     bracket(start-0.4,end+0.4,WIRE_BR_Y);
     const w=(blk.wire||'').toString(), wShort=w;
-    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#2d3a46'}});
+    annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#2d3a46'}});
     bracket(start-0.4,end+0.4,DATE_BR_Y);
-    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:8,family:'JetBrains Mono',color:'#7a8896'}});
+    annos.push({x:mid,y:DATE_TX_Y,xref:'x',yref:'paper',text:(blk.date||''),showarrow:false,font:{size:10,family:'JetBrains Mono',color:'#7a8896'}});
   });
 
   const layout=__layout(270,{
     margin:{l:40,r:8,t:14,b:120},
-    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:7,family:'JetBrains Mono'},
+    xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:9,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
-    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false},
+    yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:11}},
     shapes:shapes, annotations:annos, showlegend:false,
   });
   return __newChartDivFull([trace],layout,270);
@@ -1179,36 +795,4 @@ document.addEventListener('click', function(e){
 });
 </script>
 </body>
-</html>'''
-
-
-def main():
-    args = sys.argv[1:]
-    rec_csv   = args[0] if len(args) > 0 else './recommend_future.csv'
-    store_csv = args[1] if len(args) > 1 else './data/field_store.csv'
-    out_path  = args[2] if len(args) > 2 else './reports/recipe_report.html'
-
-    if not os.path.exists(rec_csv):
-        print(f"❌ 추천 CSV 없음: {rec_csv}"); sys.exit(1)
-
-    print(f"[리포트] 추천: {rec_csv}")
-    recs = load_recommend(rec_csv)
-    if not recs:
-        print("❌ 추천 0건 — 리포트 생성 안 함"); sys.exit(1)
-
-    print(f"[리포트] 실제: {store_csv}")
-    acts = load_actuals(store_csv)
-    records = merge(recs, acts)
-
-    html = render_html(records)
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-    with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    print(f"✅ 리포트 생성: {out_path} ({len(records)}개 장비)")
-    for r in records:
-        has_act = '실제O' if r.get('actual') else '실제X'
-        print(f"   · {r['eqp']}: WAF {r['waf']}개, 예측 BOW {r['bow']}, {has_act}")
-
-
-if __name__ == '__main__':
-    main()
+</html>
