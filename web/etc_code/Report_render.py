@@ -671,7 +671,7 @@ function horizonChart(blocks,color,recProf,opts){
 
   // 구간 브래킷 + wire/날짜
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -698,15 +698,15 @@ function horizonChart(blocks,color,recProf,opts){
 
   const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
-  const layout=__layout(280,{
-    margin:{l:44,r:8,t:8,b:140},
+  const layout=__layout(330,{
+    margin:{l:44,r:8,t:8,b:170},
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.1,lotIndex+0.1]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:(recProf&&recProf.length)?true:false,
     legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
-  return __newChartDivFull(traces,layout,280);
+  return __newChartDivFull(traces,layout,330);
 }
 
 // wire>lot 트렌드 (Plotly) — 각 lot=점, 4중첩 x축, 고정스케일, target/스펙
@@ -791,7 +791,7 @@ function lotTrendChart(blocks,color,opts){
   // ── 구간 브래킷 + 라벨 (annotation/shape, x는 data 좌표, y는 paper 아래쪽) ──
   const annos=[];
   // 브래킷 y 위치 (plot 아래 paper 좌표: 음수)
-  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     // ㄴ자 브래킷 (shape, xref data, yref paper)
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -813,15 +813,15 @@ function lotTrendChart(blocks,color,opts){
 
   const yax={showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}};
   if(yrange){yax.range=yrange;} if(dtick){yax.dtick=dtick;}
-  const layout=__layout(280,{
-    margin:{l:44,r:8,t:8,b:140},   // 4층 라벨 공간
+  const layout=__layout(330,{
+    margin:{l:44,r:8,t:8,b:170},   // 4층 라벨 공간
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.6,xs[xs.length-1]+0.6]},
     yaxis:yax, shapes:shapes, annotations:annos,
     showlegend:Object.keys(byPt).length>1,
     legend:{orientation:'h',x:0,y:1.10,font:{size:12.5}},
   });
-  return __newChartDivFull(traces,layout,280);
+  return __newChartDivFull(traces,layout,330);
 }
 
 function barSlotChart(blocks,color,unit){
@@ -852,7 +852,7 @@ function barSlotChart(blocks,color,unit){
   const tickvals=xs.slice(), ticktext=cd.map(c=>`${c[0]||''}<br>${c[3]||''}<br>${c[2]?('WG LT '+c[2]):''}`);
   // 구간 브래킷
   const shapes=[], annos=[];
-  const WIRE_BR_Y=-0.42, WIRE_TX_Y=-0.52, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
+  const WIRE_BR_Y=-0.62, WIRE_TX_Y=-0.72, DATE_BR_Y=-0.52, DATE_TX_Y=-0.62;
   function bracket(x0,x1,yb){
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x0,y0:yb+0.03,y1:yb,line:{color:'#b8bfc6',width:1}});
     shapes.push({type:'line',xref:'x',yref:'paper',x0:x0,x1:x1,y0:yb,y1:yb,line:{color:'#b8bfc6',width:1}});
@@ -867,14 +867,14 @@ function barSlotChart(blocks,color,unit){
     annos.push({x:mid,y:WIRE_TX_Y,xref:'x',yref:'paper',text:wShort,showarrow:false,font:{size:12.5,family:'JetBrains Mono',color:'#2d3a46'}});
   });
 
-  const layout=__layout(270,{
-    margin:{l:44,r:8,t:14,b:140},
+  const layout=__layout(320,{
+    margin:{l:44,r:8,t:14,b:170},
     xaxis:{tickvals:tickvals,ticktext:ticktext,tickfont:{size:12.5,family:'JetBrains Mono'},
            showgrid:false,zeroline:false,range:[-0.7,xs[xs.length-1]+0.7]},
     yaxis:{showgrid:true,gridcolor:'#eef1f4',zeroline:false,tickfont:{size:12.5}},
     shapes:shapes, annotations:annos, showlegend:false,
   });
-  return __newChartDivFull([trace],layout,270);
+  return __newChartDivFull([trace],layout,320);
 }
 
 // 단일 라인 트렌드 (계열 하나)
